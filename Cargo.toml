@@ -8,11 +8,18 @@ keywords = ["markdown", "html", "converter", "cli", "web"]
 categories = ["command-line-utilities", "web-programming"]
 
 [dependencies]
-reqwest = { version = "0.12", features = ["gzip", "brotli", "stream"] }
 tokio = { version = "1", features = ["full"] }
 lol_html = "1.2"
 anyhow = "1.0"
 futures-util = "0.3"
+
+# Windows: SChannel via native-tls (no extra deps)
+[target.'cfg(windows)'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["gzip", "brotli", "stream", "native-tls"] }
+
+# Linux/macOS: rustls (pure Rust, no OpenSSL needed — works with musl)
+[target.'cfg(not(windows))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["gzip", "brotli", "stream", "rustls-tls"] }
 
 [profile.release]
 opt-level = 3
