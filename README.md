@@ -46,7 +46,10 @@ Requires Rust 1.75+.
 
 ```text
 blitzmd [--verbose] <URL>
-blitzmd search [--limit N] [--timeout-ms MS] [--json] [--llm] [--deep] [--deep-limit N] [--verbose] <query>
+blitzmd search [--limit N] [--timeout-ms MS] [--json] [--llm] [--deep] [--deep-limit N]
+               [--providers ddg,bing] [--no-ddg] [--no-bing]
+               [--lenient | --min-match N | --no-relevance-filter]
+               [--no-domain-fallback] [--verbose] <query>
 ```
 
 ### Ultra-fast web search
@@ -70,11 +73,25 @@ blitzmd search --llm --verbose --deep --deep-limit 3 "tokio vs async-std"
 - DuckDuckGo and Bing RSS are queried in parallel.
 - Results are deduplicated and merged.
 - Fast-path can stop waiting early when confidence is high.
-- Relevance filtering removes off-topic noise.
+- Relevance filtering removes off-topic noise, with auto-relax when a strict
+  filter would drop every result (lenient → unfiltered → domain fallback).
 - Automatic rescue strategies run when providers are unstable:
 - wider-timeout retry,
 - targeted query rescue,
 - domain discovery fallback.
+
+### Tuning relevance and providers
+
+- `--providers ddg,bing` (or `--no-ddg` / `--no-bing`) picks which engines run.
+  Useful when one provider is rate-limited or down: `--no-ddg` returns whatever
+  Bing finds, with the relevance filter auto-relaxing instead of bailing.
+- `--lenient` keeps any result that matches at least one query term.
+- `--min-match N` sets the minimum number of distinct query terms a result
+  must contain.
+- `--no-relevance-filter` returns the merged results sorted by score, with no
+  filtering at all.
+- `--no-domain-fallback` disables the `{term}.dev/.com/.io/.fr` heuristic
+  fallback, so output is restricted to actual search-provider results.
 
 ### Search speed tips
 
