@@ -39,6 +39,36 @@ struct SearchOptions {
     deep: bool,
     deep_limit: usize,
     verbose: bool,
+    providers: ProviderSelection,
+    relevance: RelevanceMode,
+    min_match_override: Option<usize>,
+    domain_fallback: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProviderSelection {
+    duckduckgo: bool,
+    bing: bool,
+}
+
+impl ProviderSelection {
+    fn all() -> Self {
+        Self {
+            duckduckgo: true,
+            bing: true,
+        }
+    }
+
+    fn any_enabled(&self) -> bool {
+        self.duckduckgo || self.bing
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelevanceMode {
+    Strict,
+    Lenient,
+    Off,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -185,6 +215,11 @@ fn parse_search_command(args: &[String]) -> Result<Command> {
     let mut deep = false;
     let mut deep_limit = DEFAULT_DEEP_LIMIT;
     let mut verbose = false;
+    let mut providers = ProviderSelection::all();
+    let mut providers_explicit = false;
+    let mut relevance = RelevanceMode::Strict;
+    let mut min_match_override: Option<usize> = None;
+    let mut domain_fallback = true;
 
     let mut query_parts: Vec<String> = Vec::new();
     let mut i = 2usize;
@@ -234,6 +269,52 @@ fn parse_search_command(args: &[String]) -> Result<Command> {
                 verbose = true;
                 i += 1;
             }
+            "--providers" => {
+                let Some(value) = args.get(i + 1) else {
+                    bail!("--providers requires a value (e.g. ddg, bing, ddg,bing, all).");
+                };
+                providers = parse_provider_list(value)?;
+                providers_explicit = true;
+                i += 2;
+            }
+            "--no-ddg" | "--no-duckduckgo" => {
+                if !providers_explicit {
+                    providers = ProviderSelection::all();
+                    providers_explicit = true;
+                }
+                providers.duckduckgo = false;
+                i += 1;
+            }
+            "--no-bing" => {
+                if !providers_explicit {
+                    providers = ProviderSelection::all();
+                    providers_explicit = true;
+                }
+                providers.bing = false;
+                i += 1;
+            }
+            "--lenient" => {
+                relevance = RelevanceMode::Lenient;
+                i += 1;
+            }
+            "--no-relevance-filter" => {
+                relevance = RelevanceMode::Off;
+                i += 1;
+            }
+            "--min-match" => {
+                let Some(value) = args.get(i + 1) else {
+                    bail!("--min-match requires a value.");
+                };
+                let parsed = value
+                    .parse::<usize>()
+                    .with_context(|| format!("Invalid --min-match value: {value}"))?;
+                min_match_override = Some(parsed);
+                i += 2;
+            }
+            "--no-domain-fallback" => {
+                domain_fallback = false;
+                i += 1;
+            }
             flag if flag.starts_with('-') => {
                 bail!("Unknown search flag: {flag}");
             }
@@ -256,6 +337,10 @@ fn parse_search_command(args: &[String]) -> Result<Command> {
         bail!("--deep-limit must be greater than zero.");
     }
 
+    if !providers.any_enabled() {
+        bail!("At least one provider must be enabled (--providers cannot be empty).");
+    }
+
     let query = query_parts.join(" ");
 
     Ok(Command::Search(SearchOptions {
@@ -267,7 +352,39 @@ fn parse_search_command(args: &[String]) -> Result<Command> {
         deep,
         deep_limit,
         verbose,
+        providers,
+        relevance,
+        min_match_override,
+        domain_fallback,
     }))
+}
+
+fn parse_provider_list(value: &str) -> Result<ProviderSelection> {
+    let mut selection = ProviderSelection {
+        duckduckgo: false,
+        bing: false,
+    };
+
+    for token in value.split(',') {
+        let name = token.trim().to_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        match name.as_str() {
+            "all" => return Ok(ProviderSelection::all()),
+            "none" => {
+                return Ok(ProviderSelection {
+                    duckduckgo: false,
+                    bing: false,
+                })
+            }
+            "ddg" | "duckduckgo" => selection.duckduckgo = true,
+            "bing" | "bing-rss" => selection.bing = true,
+            other => bail!("Unknown provider: {other} (known: ddg, bing, all)"),
+        }
+    }
+
+    Ok(selection)
 }
 
 fn print_usage(bin: &str) {
@@ -275,9 +392,23 @@ fn print_usage(bin: &str) {
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  {bin} [--verbose] <URL>");
-    eprintln!(
-        "  {bin} search [--limit N] [--timeout-ms MS] [--json] [--llm] [--deep] [--deep-limit N] [--verbose] <query>"
-    );
+    eprintln!("  {bin} search [options] <query>");
+    eprintln!();
+    eprintln!("Search options:");
+    eprintln!("  --limit N             max number of results (default {DEFAULT_SEARCH_LIMIT})");
+    eprintln!("  --timeout-ms MS       per-provider timeout (default {DEFAULT_TIMEOUT_MS})");
+    eprintln!("  --json                emit JSON output");
+    eprintln!("  --llm                 emit LLM-friendly plain text");
+    eprintln!("  --deep                fetch top results and include excerpts");
+    eprintln!("  --deep-limit N        number of results to deep-fetch (default {DEFAULT_DEEP_LIMIT})");
+    eprintln!("  --providers LIST      comma-separated: ddg, bing, all (default: all)");
+    eprintln!("  --no-ddg              disable DuckDuckGo");
+    eprintln!("  --no-bing             disable Bing");
+    eprintln!("  --lenient             require only one query term to match (auto-applied as fallback)");
+    eprintln!("  --min-match N         require at least N query terms to match");
+    eprintln!("  --no-relevance-filter return raw results sorted by score, no filtering");
+    eprintln!("  --no-domain-fallback  disable the {{term}}.dev/.com/.io/.fr heuristic fallback");
+    eprintln!("  --verbose, -v         show timing and diagnostic output");
 }
 
 fn build_http_client() -> Result<reqwest::Client> {
@@ -296,8 +427,15 @@ fn build_http_client() -> Result<reqwest::Client> {
 async fn run_search(client: &reqwest::Client, options: SearchOptions) -> Result<()> {
     let t0 = Instant::now();
 
-    let mut search_run =
-        search_web(client, &options.query, options.limit, options.timeout_ms, options.verbose).await;
+    let mut search_run = search_web(
+        client,
+        &options.query,
+        options.limit,
+        options.timeout_ms,
+        options.verbose,
+        options.providers,
+    )
+    .await;
     let mut results = search_run.results.clone();
 
     if results.is_empty() && should_retry_search(&search_run.telemetry) {
@@ -309,8 +447,15 @@ async fn run_search(client: &reqwest::Client, options: SearchOptions) -> Result<
             );
         }
 
-        search_run =
-            search_web(client, &options.query, options.limit, retry_timeout_ms, options.verbose).await;
+        search_run = search_web(
+            client,
+            &options.query,
+            options.limit,
+            retry_timeout_ms,
+            options.verbose,
+            options.providers,
+        )
+        .await;
         results = search_run.results.clone();
     }
 
@@ -318,7 +463,15 @@ async fn run_search(client: &reqwest::Client, options: SearchOptions) -> Result<
         bail!("No search results returned for query: {}", options.query);
     }
 
-    let mut relevant = filter_and_rank_relevant_results(&results, &options.query, options.limit);
+    let primary_mode = options.relevance;
+    let mut relevant = filter_with_mode(
+        &results,
+        &options.query,
+        options.limit,
+        primary_mode,
+        options.min_match_override,
+    );
+
     if relevant.is_empty() {
         let retry_timeout_ms = options.timeout_ms.max(SEARCH_RETRY_TIMEOUT_MS);
         if options.verbose {
@@ -328,18 +481,33 @@ async fn run_search(client: &reqwest::Client, options: SearchOptions) -> Result<
             );
         }
 
-        let retry_run =
-            search_web(client, &options.query, options.limit, retry_timeout_ms, options.verbose).await;
-        let retry_relevant =
-            filter_and_rank_relevant_results(&retry_run.results, &options.query, options.limit);
+        let retry_run = search_web(
+            client,
+            &options.query,
+            options.limit,
+            retry_timeout_ms,
+            options.verbose,
+            options.providers,
+        )
+        .await;
+        let retry_relevant = filter_with_mode(
+            &retry_run.results,
+            &options.query,
+            options.limit,
+            primary_mode,
+            options.min_match_override,
+        );
 
         if !retry_relevant.is_empty() {
             search_run = retry_run;
+            results = search_run.results.clone();
             relevant = retry_relevant;
+        } else if !retry_run.results.is_empty() {
+            results.extend(retry_run.results);
         }
     }
 
-    if relevant.is_empty() {
+    if relevant.is_empty() && options.providers.duckduckgo {
         let quoted_query = format!("\"{}\"", options.query);
         if options.verbose {
             eprintln!("[info] relevance rescue : trying targeted DuckDuckGo query {quoted_query}");
@@ -347,8 +515,13 @@ async fn run_search(client: &reqwest::Client, options: SearchOptions) -> Result<
         if let Ok(extra_ddg) = search_duckduckgo(client, &quoted_query, options.limit).await {
             if !extra_ddg.is_empty() {
                 results.extend(extra_ddg);
-                let rescued =
-                    filter_and_rank_relevant_results(&results, &options.query, options.limit);
+                let rescued = filter_with_mode(
+                    &results,
+                    &options.query,
+                    options.limit,
+                    primary_mode,
+                    options.min_match_override,
+                );
                 if !rescued.is_empty() {
                     relevant = rescued;
                 }
@@ -356,7 +529,45 @@ async fn run_search(client: &reqwest::Client, options: SearchOptions) -> Result<
         }
     }
 
-    if relevant.is_empty() {
+    if relevant.is_empty() && primary_mode == RelevanceMode::Strict && !results.is_empty() {
+        if options.verbose {
+            eprintln!(
+                "[info] relevance relax  : strict filter dropped all {} candidates, retrying with min-match=1",
+                results.len()
+            );
+        }
+        let relaxed = filter_with_mode(
+            &results,
+            &options.query,
+            options.limit,
+            RelevanceMode::Lenient,
+            options.min_match_override,
+        );
+        if !relaxed.is_empty() {
+            relevant = relaxed;
+        }
+    }
+
+    if relevant.is_empty() && primary_mode == RelevanceMode::Strict && !results.is_empty() {
+        if options.verbose {
+            eprintln!(
+                "[info] relevance off    : no terms matched, returning top {} unfiltered results",
+                options.limit.min(results.len())
+            );
+        }
+        let unfiltered = filter_with_mode(
+            &results,
+            &options.query,
+            options.limit,
+            RelevanceMode::Off,
+            options.min_match_override,
+        );
+        if !unfiltered.is_empty() {
+            relevant = unfiltered;
+        }
+    }
+
+    if relevant.is_empty() && options.domain_fallback {
         let discovered = discover_candidate_domains(client, &options.query, options.limit).await;
         if !discovered.is_empty() {
             if options.verbose {
@@ -471,6 +682,7 @@ async fn search_web(
     limit: usize,
     timeout_ms: u64,
     verbose: bool,
+    selection: ProviderSelection,
 ) -> SearchRun {
     let started = Instant::now();
     let timeout_duration = Duration::from_millis(timeout_ms);
@@ -485,8 +697,25 @@ async fn search_web(
 
     let mut providers: Vec<Vec<SearchResult>> = Vec::new();
     let mut provider_metrics = Vec::with_capacity(2);
-    let mut ddg_done = false;
-    let mut bing_done = false;
+    let mut ddg_done = !selection.duckduckgo;
+    let mut bing_done = !selection.bing;
+
+    if !selection.duckduckgo {
+        provider_metrics.push(ProviderMetric {
+            name: "duckduckgo".to_string(),
+            elapsed_ms: 0,
+            result_count: 0,
+            status: "disabled".to_string(),
+        });
+    }
+    if !selection.bing {
+        provider_metrics.push(ProviderMetric {
+            name: "bing-rss".to_string(),
+            elapsed_ms: 0,
+            result_count: 0,
+            status: "disabled".to_string(),
+        });
+    }
 
     loop {
         if ddg_done && bing_done {
@@ -1012,17 +1241,48 @@ fn relevance_score(result: &SearchResult, terms: &[String]) -> usize {
         .count()
 }
 
+#[cfg(test)]
 fn filter_and_rank_relevant_results(
     results: &[SearchResult],
     query: &str,
     limit: usize,
 ) -> Vec<SearchResult> {
-    let terms = query_terms(query);
-    if terms.is_empty() {
+    filter_with_mode(results, query, limit, RelevanceMode::Strict, None)
+}
+
+fn filter_with_mode(
+    results: &[SearchResult],
+    query: &str,
+    limit: usize,
+    mode: RelevanceMode,
+    min_match_override: Option<usize>,
+) -> Vec<SearchResult> {
+    if results.is_empty() || limit == 0 {
         return Vec::new();
     }
 
-    let min_match = min_term_match_threshold(terms.len());
+    let terms = query_terms(query);
+
+    if mode == RelevanceMode::Off || terms.is_empty() {
+        let mut scored: Vec<(usize, SearchResult)> = results
+            .iter()
+            .cloned()
+            .map(|r| (relevance_score(&r, &terms), r))
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.truncate(limit);
+        return scored.into_iter().map(|(_, r)| r).collect();
+    }
+
+    let default_min = match mode {
+        RelevanceMode::Strict => min_term_match_threshold(terms.len()),
+        RelevanceMode::Lenient => 1,
+        RelevanceMode::Off => 0,
+    };
+    let min_match = min_match_override
+        .map(|v| v.min(terms.len()))
+        .unwrap_or(default_min);
+
     let mut scored: Vec<(usize, SearchResult)> = results
         .iter()
         .cloned()
@@ -2159,5 +2419,159 @@ mod tests {
         };
 
         assert!(should_retry_search(&telemetry));
+    }
+
+    #[test]
+    fn parse_provider_list_accepts_known_names() {
+        let sel = parse_provider_list("ddg,bing").expect("should parse");
+        assert!(sel.duckduckgo);
+        assert!(sel.bing);
+
+        let only_bing = parse_provider_list("bing").expect("should parse");
+        assert!(!only_bing.duckduckgo);
+        assert!(only_bing.bing);
+
+        let all = parse_provider_list("all").expect("should parse");
+        assert!(all.duckduckgo);
+        assert!(all.bing);
+    }
+
+    #[test]
+    fn parse_provider_list_rejects_unknown_names() {
+        let err = parse_provider_list("ddg,google").unwrap_err();
+        assert!(err.to_string().contains("Unknown provider"));
+    }
+
+    #[test]
+    fn parse_search_command_parses_new_flags() {
+        let args = vec![
+            "blitzmd".to_string(),
+            "search".to_string(),
+            "--no-bing".to_string(),
+            "--no-domain-fallback".to_string(),
+            "--lenient".to_string(),
+            "athenox".to_string(),
+        ];
+
+        let command = parse_command(&args).expect("command should parse");
+        match command {
+            Command::Search(opts) => {
+                assert!(opts.providers.duckduckgo);
+                assert!(!opts.providers.bing);
+                assert!(!opts.domain_fallback);
+                assert_eq!(opts.relevance, RelevanceMode::Lenient);
+            }
+            _ => panic!("expected search command"),
+        }
+    }
+
+    #[test]
+    fn parse_search_command_rejects_disabling_all_providers() {
+        let args = vec![
+            "blitzmd".to_string(),
+            "search".to_string(),
+            "--providers".to_string(),
+            "none".to_string(),
+            "athenox".to_string(),
+        ];
+
+        let err = parse_command(&args).unwrap_err();
+        assert!(err.to_string().contains("provider"));
+    }
+
+    #[test]
+    fn filter_lenient_keeps_single_term_matches() {
+        let results = vec![
+            SearchResult {
+                title: "Athenox studio".to_string(),
+                url: "https://example.com/a".to_string(),
+                snippet: String::new(),
+                source: "bing-rss".to_string(),
+            },
+            SearchResult {
+                title: "Random page".to_string(),
+                url: "https://example.com/b".to_string(),
+                snippet: String::new(),
+                source: "bing-rss".to_string(),
+            },
+        ];
+
+        let strict = filter_with_mode(
+            &results,
+            "Athenox Development",
+            8,
+            RelevanceMode::Strict,
+            None,
+        );
+        assert!(
+            strict.is_empty(),
+            "strict mode should drop single-term matches"
+        );
+
+        let lenient = filter_with_mode(
+            &results,
+            "Athenox Development",
+            8,
+            RelevanceMode::Lenient,
+            None,
+        );
+        assert_eq!(lenient.len(), 1);
+        assert!(lenient[0].title.contains("Athenox"));
+    }
+
+    #[test]
+    fn filter_off_returns_top_results_sorted_by_score() {
+        let results = vec![
+            SearchResult {
+                title: "Visit Bologna".to_string(),
+                url: "https://example.com/bologna".to_string(),
+                snippet: "Travel guide".to_string(),
+                source: "bing-rss".to_string(),
+            },
+            SearchResult {
+                title: "Athenox studio".to_string(),
+                url: "https://example.com/a".to_string(),
+                snippet: String::new(),
+                source: "bing-rss".to_string(),
+            },
+        ];
+
+        let off = filter_with_mode(
+            &results,
+            "Athenox Development",
+            8,
+            RelevanceMode::Off,
+            None,
+        );
+        assert_eq!(off.len(), 2);
+        assert!(off[0].title.contains("Athenox"));
+    }
+
+    #[test]
+    fn filter_min_match_override_relaxes_threshold() {
+        let results = vec![SearchResult {
+            title: "Athenox is great".to_string(),
+            url: "https://example.com/a".to_string(),
+            snippet: String::new(),
+            source: "bing-rss".to_string(),
+        }];
+
+        let strict = filter_with_mode(
+            &results,
+            "Athenox Development",
+            8,
+            RelevanceMode::Strict,
+            None,
+        );
+        assert!(strict.is_empty());
+
+        let overridden = filter_with_mode(
+            &results,
+            "Athenox Development",
+            8,
+            RelevanceMode::Strict,
+            Some(1),
+        );
+        assert_eq!(overridden.len(), 1);
     }
 }
